@@ -12,9 +12,14 @@ struct SpectrogramView: View {
             Text(result.fileName)
                 .font(.headline)
 
-            Text(metadataLine)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(metadataLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(timingLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary.opacity(0.85))
+            }
 
             GeometryReader { proxy in
                 let horizontalSpacing: CGFloat = 8
@@ -74,12 +79,24 @@ struct SpectrogramView: View {
         "\(formatSampleRate(result.sampleRate)) • \(result.sourceChannelCount) ch mixed to mono • FFT \(result.fftSize) • Hop \(result.hopSize) • Linear frequency"
     }
 
+    private var timingLine: String {
+        if result.decoderBackend.contains("(stream)") {
+            return "\(result.decoderBackend) \(formatMs(result.decodeDuration)) • render \(formatMs(result.renderDuration))"
+        }
+        return "\(result.decoderBackend) decode \(formatMs(result.decodeDuration)) • analyze \(formatMs(result.analysisDuration)) • render \(formatMs(result.renderDuration))"
+    }
+
     private var frequencyTicks: [Double] {
         linearFrequencyTicks(minFrequency: result.minFrequency, maxFrequency: result.maxFrequency, targetCount: 7)
     }
 
     private func formatSampleRate(_ sampleRate: Double) -> String {
         String(format: "%.1f kHz", sampleRate / 1000)
+    }
+
+    private func formatMs(_ duration: TimeInterval) -> String {
+        let milliseconds = Int((duration * 1000).rounded())
+        return "\(milliseconds) ms"
     }
 }
 

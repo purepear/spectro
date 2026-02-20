@@ -1,11 +1,18 @@
+import Accelerate
 import AVFoundation
 import CoreMedia
 import Foundation
+
+enum DecoderBackend: String {
+    case avAudioFile = "AVAudioFile"
+    case avAssetReader = "AVAssetReader"
+}
 
 struct DecodedAudio {
     let samples: [Float]
     let sampleRate: Double
     let channelCount: Int
+    let backend: DecoderBackend
 
     var duration: TimeInterval {
         guard sampleRate > 0 else { return 0 }
@@ -46,9 +53,13 @@ enum AudioDecoderError: LocalizedError {
 }
 
 enum AudioDecoder {
+    static func decodeMonoSamplesAVAudioFileOnly(from url: URL) throws -> DecodedAudio {
+        try decodeUsingAVAudioFile(from: url)
+    }
+
     static func decodeMonoSamples(from url: URL) async throws -> DecodedAudio {
         do {
-            return try decodeUsingAVAudioFile(from: url)
+            return try decodeMonoSamplesAVAudioFileOnly(from: url)
         } catch {
             let primaryNSError = error as NSError
 
@@ -79,15 +90,16 @@ enum AudioDecoder {
             throw AudioDecoderError.noChannels
         }
 
-        let chunkSize: AVAudioFrameCount = 32_768
+        let chunkSize: AVAudioFrameCount = 65_536
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkSize) else {
+            throw AudioDecoderError.bufferAllocationFailed
+        }
+
         var monoSamples: [Float] = []
         monoSamples.reserveCapacity(max(Int(file.length), Int(chunkSize)))
+        var mixScratch: [Float] = [Float](repeating: 0, count: Int(chunkSize))
 
         while true {
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkSize) else {
-                throw AudioDecoderError.bufferAllocationFailed
-            }
-
             try file.read(into: buffer, frameCount: chunkSize)
 
             let frameCount = Int(buffer.frameLength)
@@ -101,15 +113,26 @@ enum AudioDecoder {
 
             if channelCount == 1 {
                 monoSamples.append(contentsOf: UnsafeBufferPointer(start: channels[0], count: frameCount))
-            } else {
-                for frameIndex in 0..<frameCount {
-                    var sum: Float = 0
-                    for channelIndex in 0..<channelCount {
-                        sum += channels[channelIndex][frameIndex]
-                    }
-                    monoSamples.append(sum / Float(channelCount))
-                }
+                continue
             }
+
+            if mixScratch.count < frameCount {
+                mixScratch = [Float](repeating: 0, count: frameCount)
+            }
+
+            mixScratch.withUnsafeMutableBufferPointer { scratchPtr in
+                guard let scratchBase = scratchPtr.baseAddress else { return }
+
+                scratchBase.update(from: channels[0], count: frameCount)
+                for channelIndex in 1..<channelCount {
+                    vDSP_vadd(scratchBase, 1, channels[channelIndex], 1, scratchBase, 1, vDSP_Length(frameCount))
+                }
+
+                var scale: Float = 1.0 / Float(channelCount)
+                vDSP_vsmul(scratchBase, 1, &scale, scratchBase, 1, vDSP_Length(frameCount))
+            }
+
+            monoSamples.append(contentsOf: mixScratch.prefix(frameCount))
         }
 
         guard !monoSamples.isEmpty else {
@@ -119,7 +142,8 @@ enum AudioDecoder {
         return DecodedAudio(
             samples: monoSamples,
             sampleRate: format.sampleRate,
-            channelCount: channelCount
+            channelCount: channelCount,
+            backend: .avAudioFile
         )
     }
 
@@ -252,7 +276,8 @@ enum AudioDecoder {
         return DecodedAudio(
             samples: monoSamples,
             sampleRate: sampleRate,
-            channelCount: channelCount
+            channelCount: channelCount,
+            backend: .avAssetReader
         )
     }
 

@@ -23,6 +23,10 @@ No third-party libraries are used.
   - Hann window
   - Linear-frequency display
   - Absolute dBFS power scale (`0 dB` equals full-scale sine reference)
+  - Adaptive frame subsampling for faster analysis on long files
+  - Multi-core FFT processing for faster analysis
+  - Decoder + stage timing shown in UI (`decode / analyze / render`)
+  - AVAssetReader fallback uses one-pass stream analysis (no full PCM staging)
   - Static image output
 
 ## Run

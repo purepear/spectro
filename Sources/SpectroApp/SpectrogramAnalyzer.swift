@@ -1,7 +1,7 @@
 import Accelerate
 import AVFoundation
-import CoreMedia
 import CoreGraphics
+import CoreMedia
 import Foundation
 
 struct SpectrogramConfig {
@@ -11,6 +11,8 @@ struct SpectrogramConfig {
     let minDecibels: Float
     let maxDecibels: Float
     let maxColumns: Int
+    let targetFramesPerColumn: Int
+    let maxParallelWorkers: Int
     let imageHeight: Int
 
     static let v1 = SpectrogramConfig(
@@ -19,7 +21,9 @@ struct SpectrogramConfig {
         minFrequency: 0,
         minDecibels: -120,
         maxDecibels: 0,
-        maxColumns: 2800,
+        maxColumns: 1400,
+        targetFramesPerColumn: 2,
+        maxParallelWorkers: 6,
         imageHeight: 760
     )
 }
@@ -38,12 +42,20 @@ struct SpectrogramResult {
     let hopSize: Int
     let renderedWidth: Int
     let renderedHeight: Int
+    let decoderBackend: String
+    let decodeDuration: TimeInterval
+    let analysisDuration: TimeInterval
+    let renderDuration: TimeInterval
 }
 
 enum SpectrogramAnalyzerError: LocalizedError {
     case invalidFFTSize
     case fftSetupFailed
     case renderingFailed
+    case noAudioTrack
+    case cannotCreateAssetReader
+    case cannotAddReaderOutput
+    case cannotReadSampleBuffer
 
     var errorDescription: String? {
         switch self {
@@ -53,6 +65,14 @@ enum SpectrogramAnalyzerError: LocalizedError {
             return "Could not initialize FFT setup."
         case .renderingFailed:
             return "Could not render spectrogram image."
+        case .noAudioTrack:
+            return "No audio track was found in this file."
+        case .cannotCreateAssetReader:
+            return "Could not create AVAssetReader for this file."
+        case .cannotAddReaderOutput:
+            return "Could not configure AVAssetReader output."
+        case .cannotReadSampleBuffer:
+            return "Could not read audio sample buffers from this file."
         }
     }
 }
@@ -63,32 +83,38 @@ private struct AggregatedSpectrum {
     let bins: Int
 }
 
+private struct PartialSpectrum {
+    let powerSums: [Float]
+    let frameCounts: [Int]
+}
+
+private struct StreamingAnalysisResult {
+    let spectrum: AggregatedSpectrum
+    let sampleRate: Double
+    let sourceChannelCount: Int
+    let duration: TimeInterval
+}
+
 enum SpectrogramAnalyzer {
     static func analyze(url: URL, config: SpectrogramConfig = .v1) async throws -> SpectrogramResult {
         try await Task.detached(priority: .userInitiated) {
-            let decoded = try await AudioDecoder.decodeMonoSamples(from: url)
-            try throwIfCancelled()
+            // Fast path: AVAudioFile decode + parallel FFT analysis.
+            if let decodedResult = try await analyzeUsingAVAudioFile(url: url, config: config) {
+                return decodedResult
+            }
 
-            let cutoffHintHz = await lossyCodecCutoffHint(
-                for: url,
-                sampleRate: decoded.sampleRate,
-                fallbackChannelCount: decoded.channelCount
-            )
+            // Fallback: stream and analyze directly from AVAssetReader in one pass.
+            let streamStart = CFAbsoluteTimeGetCurrent()
+            let streaming = try await analyzeUsingAVAssetReaderStream(url: url, config: config)
+            let streamDuration = CFAbsoluteTimeGetCurrent() - streamStart
 
-            let aggregated = try aggregateSpectrum(
-                samples: decoded.samples,
-                sampleRate: decoded.sampleRate,
-                cutoffHintHz: cutoffHintHz,
-                config: config
-            )
-            try throwIfCancelled()
-
-            let maxFrequency = decoded.sampleRate / 2.0
+            let renderStart = CFAbsoluteTimeGetCurrent()
+            let maxFrequency = streaming.sampleRate / 2.0
             guard let image = SpectrogramRenderer.render(
-                decibelsByColumn: aggregated.decibelsByColumn,
-                columns: aggregated.columns,
-                bins: aggregated.bins,
-                sampleRate: decoded.sampleRate,
+                decibelsByColumn: streaming.spectrum.decibelsByColumn,
+                columns: streaming.spectrum.columns,
+                bins: streaming.spectrum.bins,
+                sampleRate: streaming.sampleRate,
                 minFrequency: config.minFrequency,
                 maxFrequency: maxFrequency,
                 minDecibels: config.minDecibels,
@@ -97,23 +123,530 @@ enum SpectrogramAnalyzer {
             ) else {
                 throw SpectrogramAnalyzerError.renderingFailed
             }
+            let renderDuration = CFAbsoluteTimeGetCurrent() - renderStart
 
             return SpectrogramResult(
                 image: image,
                 fileName: url.lastPathComponent,
-                duration: decoded.duration,
-                sampleRate: decoded.sampleRate,
-                sourceChannelCount: decoded.channelCount,
+                duration: streaming.duration,
+                sampleRate: streaming.sampleRate,
+                sourceChannelCount: streaming.sourceChannelCount,
                 minFrequency: config.minFrequency,
                 maxFrequency: maxFrequency,
                 minDecibels: config.minDecibels,
                 maxDecibels: config.maxDecibels,
                 fftSize: config.fftSize,
                 hopSize: config.hopSize,
-                renderedWidth: aggregated.columns,
-                renderedHeight: config.imageHeight
+                renderedWidth: streaming.spectrum.columns,
+                renderedHeight: config.imageHeight,
+                decoderBackend: "AVAssetReader(stream)",
+                decodeDuration: streamDuration,
+                analysisDuration: 0,
+                renderDuration: renderDuration
             )
         }.value
+    }
+
+    private static func analyzeUsingAVAudioFile(url: URL, config: SpectrogramConfig) async throws -> SpectrogramResult? {
+        let decodeStart = CFAbsoluteTimeGetCurrent()
+        let decoded: DecodedAudio
+        do {
+            decoded = try AudioDecoder.decodeMonoSamplesAVAudioFileOnly(from: url)
+        } catch {
+            return nil
+        }
+        let decodeDuration = CFAbsoluteTimeGetCurrent() - decodeStart
+        try throwIfCancelled()
+
+        let cutoffHintHz = await lossyCodecCutoffHint(
+            for: url,
+            sampleRate: decoded.sampleRate,
+            fallbackChannelCount: decoded.channelCount
+        )
+
+        let analysisStart = CFAbsoluteTimeGetCurrent()
+        let aggregated = try await aggregateSpectrum(
+            samples: decoded.samples,
+            sampleRate: decoded.sampleRate,
+            cutoffHintHz: cutoffHintHz,
+            config: config
+        )
+        let analysisDuration = CFAbsoluteTimeGetCurrent() - analysisStart
+        try throwIfCancelled()
+
+        let renderStart = CFAbsoluteTimeGetCurrent()
+        let maxFrequency = decoded.sampleRate / 2.0
+        guard let image = SpectrogramRenderer.render(
+            decibelsByColumn: aggregated.decibelsByColumn,
+            columns: aggregated.columns,
+            bins: aggregated.bins,
+            sampleRate: decoded.sampleRate,
+            minFrequency: config.minFrequency,
+            maxFrequency: maxFrequency,
+            minDecibels: config.minDecibels,
+            maxDecibels: config.maxDecibels,
+            imageHeight: config.imageHeight
+        ) else {
+            throw SpectrogramAnalyzerError.renderingFailed
+        }
+        let renderDuration = CFAbsoluteTimeGetCurrent() - renderStart
+
+        return SpectrogramResult(
+            image: image,
+            fileName: url.lastPathComponent,
+            duration: decoded.duration,
+            sampleRate: decoded.sampleRate,
+            sourceChannelCount: decoded.channelCount,
+            minFrequency: config.minFrequency,
+            maxFrequency: maxFrequency,
+            minDecibels: config.minDecibels,
+            maxDecibels: config.maxDecibels,
+            fftSize: config.fftSize,
+            hopSize: config.hopSize,
+            renderedWidth: aggregated.columns,
+            renderedHeight: config.imageHeight,
+            decoderBackend: decoded.backend.rawValue,
+            decodeDuration: decodeDuration,
+            analysisDuration: analysisDuration,
+            renderDuration: renderDuration
+        )
+    }
+
+    private static func analyzeUsingAVAssetReaderStream(url: URL, config: SpectrogramConfig) async throws -> StreamingAnalysisResult {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let track = tracks.first else {
+            throw SpectrogramAnalyzerError.noAudioTrack
+        }
+
+        let initialDetails = await trackAudioDetails(track)
+        var sampleRate = initialDetails.sampleRate > 0 ? initialDetails.sampleRate : 44_100
+        var sourceChannelCount = max(1, initialDetails.channelCount)
+
+        let assetDurationTime = (try? await asset.load(.duration)) ?? CMTime.invalid
+        let durationSeconds = finiteSeconds(assetDurationTime)
+        let estimatedSampleCount = max(config.fftSize, Int(durationSeconds * sampleRate))
+
+        let frameEstimate = requiredFrameCount(
+            sampleCount: estimatedSampleCount,
+            fftSize: config.fftSize,
+            hopSize: config.hopSize
+        )
+
+        let bins = (config.fftSize / 2) + 1
+        let initialColumns = min(frameEstimate, config.maxColumns)
+        let desiredFrameSamples = max(1, initialColumns * max(1, config.targetFramesPerColumn))
+        let frameStride = max(1, frameEstimate / desiredFrameSamples)
+        let processedFrameEstimate = Int(ceil(Double(frameEstimate) / Double(frameStride)))
+        let columns = max(1, min(initialColumns, processedFrameEstimate))
+        let framesPerColumn = Double(max(1, frameEstimate)) / Double(columns)
+
+        let window = vDSP.window(
+            ofType: Float.self,
+            usingSequence: .hanningDenormalized,
+            count: config.fftSize,
+            isHalfWindow: false
+        )
+
+        let fftSize = config.fftSize
+        let halfSize = fftSize / 2
+        let coherentGain = max(window.reduce(0, +) / Float(fftSize), 1e-6)
+        let edgeScale = 1.0 / (Float(fftSize * fftSize) * coherentGain * coherentGain)
+        let interiorScale = edgeScale * 4.0
+
+        let log2n = vDSP_Length(Int(log2(Double(fftSize))))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            throw SpectrogramAnalyzerError.fftSetupFailed
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        let reader: AVAssetReader
+        do {
+            reader = try AVAssetReader(asset: asset)
+        } catch {
+            throw SpectrogramAnalyzerError.cannotCreateAssetReader
+        }
+
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: outputSettings)
+        output.alwaysCopiesSampleData = false
+
+        guard reader.canAdd(output) else {
+            throw SpectrogramAnalyzerError.cannotAddReaderOutput
+        }
+
+        reader.add(output)
+        guard reader.startReading() else {
+            throw reader.error ?? SpectrogramAnalyzerError.cannotCreateAssetReader
+        }
+
+        let cutoffHintHz = await lossyCodecCutoffHint(
+            for: url,
+            sampleRate: sampleRate,
+            fallbackChannelCount: sourceChannelCount
+        )
+
+        var aggregatedPowerSums = [Float](repeating: 0, count: columns * bins)
+        var columnFrameCounts = [Int](repeating: 0, count: columns)
+
+        var monoFIFO: [Float] = []
+        monoFIFO.reserveCapacity(max(fftSize * 8, 262_144))
+        var fifoStart = 0
+
+        var mixScratch: [Float] = []
+        var interleavedScratch: [Float] = []
+
+        var fftInput = [Float](repeating: 0, count: fftSize)
+        var splitReal = [Float](repeating: 0, count: halfSize)
+        var splitImag = [Float](repeating: 0, count: halfSize)
+
+        let vectorLength = vDSP_Length(fftSize)
+        var frameIndex = 0
+        var totalMonoSamples = 0
+
+        try splitReal.withUnsafeMutableBufferPointer { splitRealPtr in
+            try splitImag.withUnsafeMutableBufferPointer { splitImagPtr in
+                guard
+                    let splitRealBase = splitRealPtr.baseAddress,
+                    let splitImagBase = splitImagPtr.baseAddress
+                else {
+                    throw SpectrogramAnalyzerError.fftSetupFailed
+                }
+
+                var splitComplex = DSPSplitComplex(realp: splitRealBase, imagp: splitImagBase)
+
+                while let sampleBuffer = output.copyNextSampleBuffer() {
+                    defer { CMSampleBufferInvalidate(sampleBuffer) }
+
+                    let sourceFrameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+                    guard sourceFrameCount > 0 else { continue }
+
+                    if let details = streamDetails(from: sampleBuffer) {
+                        if details.sampleRate > 0 {
+                            sampleRate = details.sampleRate
+                        }
+                        sourceChannelCount = max(1, details.channelCount)
+                    }
+
+                    guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+                        throw SpectrogramAnalyzerError.cannotReadSampleBuffer
+                    }
+
+                    let availableBytes = CMBlockBufferGetDataLength(blockBuffer)
+                    guard availableBytes > 0 else { continue }
+
+                    let channelCount = max(1, sourceChannelCount)
+                    let expectedBytes = sourceFrameCount * channelCount * MemoryLayout<Float>.size
+                    let copyByteCount = min(availableBytes, expectedBytes)
+                    guard copyByteCount > 0, copyByteCount % MemoryLayout<Float>.size == 0 else {
+                        throw SpectrogramAnalyzerError.cannotReadSampleBuffer
+                    }
+
+                    let interleavedCount = copyByteCount / MemoryLayout<Float>.size
+                    let decodedFrameCount = interleavedCount / channelCount
+                    guard decodedFrameCount > 0 else { continue }
+
+                    var lengthAtOffset = 0
+                    var totalLength = 0
+                    var dataPointer: UnsafeMutablePointer<Int8>?
+                    let pointerStatus = CMBlockBufferGetDataPointer(
+                        blockBuffer,
+                        atOffset: 0,
+                        lengthAtOffsetOut: &lengthAtOffset,
+                        totalLengthOut: &totalLength,
+                        dataPointerOut: &dataPointer
+                    )
+
+                    if pointerStatus == kCMBlockBufferNoErr,
+                       let dataPointer,
+                       lengthAtOffset >= copyByteCount,
+                       totalLength >= copyByteCount {
+                        let floatPointer = UnsafeRawPointer(dataPointer).bindMemory(to: Float.self, capacity: interleavedCount)
+                        appendMonoFromInterleaved(
+                            interleaved: floatPointer,
+                            frameCount: decodedFrameCount,
+                            channelCount: channelCount,
+                            mixScratch: &mixScratch,
+                            output: &monoFIFO
+                        )
+                    } else {
+                        if interleavedScratch.count < interleavedCount {
+                            interleavedScratch = [Float](repeating: 0, count: interleavedCount)
+                        }
+
+                        let status = interleavedScratch.withUnsafeMutableBytes { rawPtr in
+                            CMBlockBufferCopyDataBytes(
+                                blockBuffer,
+                                atOffset: 0,
+                                dataLength: copyByteCount,
+                                destination: rawPtr.baseAddress!
+                            )
+                        }
+
+                        guard status == kCMBlockBufferNoErr else {
+                            throw SpectrogramAnalyzerError.cannotReadSampleBuffer
+                        }
+
+                        interleavedScratch.withUnsafeBufferPointer { pointer in
+                            guard let base = pointer.baseAddress else { return }
+                            appendMonoFromInterleaved(
+                                interleaved: base,
+                                frameCount: decodedFrameCount,
+                                channelCount: channelCount,
+                                mixScratch: &mixScratch,
+                                output: &monoFIFO
+                            )
+                        }
+                    }
+
+                    totalMonoSamples += decodedFrameCount
+
+                    while (monoFIFO.count - fifoStart) >= fftSize {
+                        if frameIndex % frameStride == 0 {
+                            monoFIFO.withUnsafeBufferPointer { monoPtr in
+                                guard let monoBase = monoPtr.baseAddress else { return }
+                                let frameBase = monoBase + fifoStart
+                                processFrame(
+                                    frameBase: frameBase,
+                                    frameIndex: frameIndex,
+                                    fftInput: &fftInput,
+                                    splitComplex: &splitComplex,
+                                    fftSetup: fftSetup,
+                                    log2n: log2n,
+                                    window: window,
+                                    vectorLength: vectorLength,
+                                    columns: columns,
+                                    bins: bins,
+                                    framesPerColumn: framesPerColumn,
+                                    edgeScale: edgeScale,
+                                    interiorScale: interiorScale,
+                                    aggregatedPowerSums: &aggregatedPowerSums,
+                                    columnFrameCounts: &columnFrameCounts
+                                )
+                            }
+                        }
+
+                        frameIndex += 1
+                        fifoStart += config.hopSize
+
+                        if fifoStart > 65_536, fifoStart > monoFIFO.count / 2 {
+                            monoFIFO.removeFirst(fifoStart)
+                            fifoStart = 0
+                        }
+                    }
+
+                    try throwIfCancelled()
+                }
+
+                // Final zero-padded tail frame.
+                let remaining = monoFIFO.count - fifoStart
+                if remaining > 0 {
+                    var tailFrame = [Float](repeating: 0, count: fftSize)
+                    monoFIFO.withUnsafeBufferPointer { monoPtr in
+                        tailFrame.withUnsafeMutableBufferPointer { tailPtr in
+                            guard
+                                let monoBase = monoPtr.baseAddress,
+                                let tailBase = tailPtr.baseAddress
+                            else {
+                                return
+                            }
+                            tailBase.update(from: monoBase + fifoStart, count: min(remaining, fftSize))
+                        }
+                    }
+
+                    if frameIndex % frameStride == 0 {
+                        tailFrame.withUnsafeBufferPointer { tailPtr in
+                            guard let tailBase = tailPtr.baseAddress else { return }
+                            processFrame(
+                                frameBase: tailBase,
+                                frameIndex: frameIndex,
+                                fftInput: &fftInput,
+                                splitComplex: &splitComplex,
+                                fftSetup: fftSetup,
+                                log2n: log2n,
+                                window: window,
+                                vectorLength: vectorLength,
+                                columns: columns,
+                                bins: bins,
+                                framesPerColumn: framesPerColumn,
+                                edgeScale: edgeScale,
+                                interiorScale: interiorScale,
+                                aggregatedPowerSums: &aggregatedPowerSums,
+                                columnFrameCounts: &columnFrameCounts
+                            )
+                        }
+                    }
+                    frameIndex += 1
+                }
+            }
+        }
+        if reader.status == .failed {
+            throw reader.error ?? SpectrogramAnalyzerError.cannotReadSampleBuffer
+        }
+
+        let averagePowers = averagedPowers(
+            aggregatedPowerSums: aggregatedPowerSums,
+            columnFrameCounts: columnFrameCounts,
+            columns: columns,
+            bins: bins
+        )
+
+        var aggregatedDecibels = [Float](repeating: config.minDecibels, count: columns * bins)
+        for index in 0..<(columns * bins) {
+            let power = max(averagePowers[index], 1e-20)
+            let decibels = 10 * log10(power)
+            aggregatedDecibels[index] = min(config.maxDecibels, max(config.minDecibels, decibels))
+        }
+
+        if let cutoffHintHz {
+            let nyquist = sampleRate / 2.0
+            if nyquist > 0 {
+                let normalized = min(1.0, max(0.0, cutoffHintHz / nyquist))
+                let hintedBin = Int((Double(bins - 1) * normalized).rounded())
+                let cutoffBin = min(max(0, hintedBin), bins - 1)
+                clampToCutoff(
+                    decibels: &aggregatedDecibels,
+                    columns: columns,
+                    bins: bins,
+                    cutoffBin: cutoffBin,
+                    floorDecibels: config.minDecibels
+                )
+            }
+        }
+
+        let finalDuration = durationSeconds > 0 ? durationSeconds : Double(totalMonoSamples) / max(1.0, sampleRate)
+
+        return StreamingAnalysisResult(
+            spectrum: AggregatedSpectrum(
+                decibelsByColumn: aggregatedDecibels,
+                columns: columns,
+                bins: bins
+            ),
+            sampleRate: sampleRate,
+            sourceChannelCount: sourceChannelCount,
+            duration: finalDuration
+        )
+    }
+
+    private static func processFrame(
+        frameBase: UnsafePointer<Float>,
+        frameIndex: Int,
+        fftInput: inout [Float],
+        splitComplex: inout DSPSplitComplex,
+        fftSetup: FFTSetup,
+        log2n: vDSP_Length,
+        window: [Float],
+        vectorLength: vDSP_Length,
+        columns: Int,
+        bins: Int,
+        framesPerColumn: Double,
+        edgeScale: Float,
+        interiorScale: Float,
+        aggregatedPowerSums: inout [Float],
+        columnFrameCounts: inout [Int]
+    ) {
+        fftInput.withUnsafeMutableBufferPointer { fftInputPtr in
+            window.withUnsafeBufferPointer { windowPtr in
+                guard
+                    let fftInputBase = fftInputPtr.baseAddress,
+                    let windowBase = windowPtr.baseAddress
+                else {
+                    return
+                }
+
+                let splitRealBase = splitComplex.realp
+                let splitImagBase = splitComplex.imagp
+
+                fftInputBase.update(from: frameBase, count: Int(vectorLength))
+
+                var frameMean: Float = 0
+                vDSP_meanv(fftInputBase, 1, &frameMean, vectorLength)
+
+                var negativeMean = -frameMean
+                vDSP_vsadd(fftInputBase, 1, &negativeMean, fftInputBase, 1, vectorLength)
+                vDSP_vmul(fftInputBase, 1, windowBase, 1, fftInputBase, 1, vectorLength)
+
+                let halfCount = Int(vectorLength) / 2
+                fftInputBase.withMemoryRebound(to: DSPComplex.self, capacity: halfCount) { complexBuffer in
+                    vDSP_ctoz(complexBuffer, 2, &splitComplex, 1, vDSP_Length(halfCount))
+                }
+
+                vDSP_fft_zrip(
+                    fftSetup,
+                    &splitComplex,
+                    1,
+                    log2n,
+                    FFTDirection(FFT_FORWARD)
+                )
+
+                let columnIndex = min(columns - 1, Int(Double(frameIndex) / framesPerColumn))
+                let columnOffset = columnIndex * bins
+                columnFrameCounts[columnIndex] += 1
+
+                let dc = splitRealBase[0] * splitRealBase[0] * edgeScale
+                aggregatedPowerSums[columnOffset] += dc
+
+                if bins > 2 {
+                    for bin in 1..<(bins - 1) {
+                        let real = splitRealBase[bin]
+                        let imag = splitImagBase[bin]
+                        let power = (real * real + imag * imag) * interiorScale
+                        aggregatedPowerSums[columnOffset + bin] += power
+                    }
+                }
+
+                let nyquist = splitImagBase[0] * splitImagBase[0] * edgeScale
+                aggregatedPowerSums[columnOffset + bins - 1] += nyquist
+            }
+        }
+    }
+
+    private static func appendMonoFromInterleaved(
+        interleaved: UnsafePointer<Float>,
+        frameCount: Int,
+        channelCount: Int,
+        mixScratch: inout [Float],
+        output: inout [Float]
+    ) {
+        guard frameCount > 0 else { return }
+
+        if channelCount == 1 {
+            output.append(contentsOf: UnsafeBufferPointer(start: interleaved, count: frameCount))
+            return
+        }
+
+        if channelCount == 2 {
+            if mixScratch.count < frameCount {
+                mixScratch = [Float](repeating: 0, count: frameCount)
+            }
+
+            mixScratch.withUnsafeMutableBufferPointer { scratchPtr in
+                guard let scratchBase = scratchPtr.baseAddress else { return }
+
+                vDSP_vadd(interleaved, 2, interleaved + 1, 2, scratchBase, 1, vDSP_Length(frameCount))
+                var scale: Float = 0.5
+                vDSP_vsmul(scratchBase, 1, &scale, scratchBase, 1, vDSP_Length(frameCount))
+            }
+
+            output.append(contentsOf: mixScratch.prefix(frameCount))
+            return
+        }
+
+        for frame in 0..<frameCount {
+            let base = frame * channelCount
+            var sum: Float = 0
+            for channel in 0..<channelCount {
+                sum += interleaved[base + channel]
+            }
+            output.append(sum / Float(channelCount))
+        }
     }
 
     private static func aggregateSpectrum(
@@ -121,7 +654,7 @@ enum SpectrogramAnalyzer {
         sampleRate: Double,
         cutoffHintHz: Double?,
         config: SpectrogramConfig
-    ) throws -> AggregatedSpectrum {
+    ) async throws -> AggregatedSpectrum {
         guard isPowerOfTwo(config.fftSize), config.fftSize > 0 else {
             throw SpectrogramAnalyzerError.invalidFFTSize
         }
@@ -133,13 +666,15 @@ enum SpectrogramAnalyzer {
         if paddedSamples.count < requiredSampleCount {
             paddedSamples.append(contentsOf: repeatElement(0, count: requiredSampleCount - paddedSamples.count))
         }
+        let analysisSamples = paddedSamples
 
         let bins = (config.fftSize / 2) + 1
-        let columns = min(paddedFrameCount, config.maxColumns)
-        let framesPerColumn = Double(paddedFrameCount) / Double(columns)
-
-        var aggregatedPowerSums = [Float](repeating: 0, count: columns * bins)
-        var columnFrameCounts = [Int](repeating: 0, count: columns)
+        let initialColumns = min(paddedFrameCount, config.maxColumns)
+        let desiredFrameSamples = max(1, initialColumns * max(1, config.targetFramesPerColumn))
+        let frameStride = max(1, paddedFrameCount / desiredFrameSamples)
+        let processedFrameCount = Int(ceil(Double(paddedFrameCount) / Double(frameStride)))
+        let columns = max(1, min(initialColumns, processedFrameCount))
+        let framesPerColumn = Double(max(1, paddedFrameCount)) / Double(columns)
 
         let window = vDSP.window(
             ofType: Float.self,
@@ -149,89 +684,76 @@ enum SpectrogramAnalyzer {
         )
 
         let fftSize = config.fftSize
-        let halfSize = fftSize / 2
-        let log2n = vDSP_Length(Int(log2(Double(fftSize))))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
-            throw SpectrogramAnalyzerError.fftSetupFailed
-        }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
         let coherentGain = max(window.reduce(0, +) / Float(fftSize), 1e-6)
         let edgeScale = 1.0 / (Float(fftSize * fftSize) * coherentGain * coherentGain)
         let interiorScale = edgeScale * 4.0
 
-        var fftInput = [Float](repeating: 0, count: fftSize)
-        var splitReal = [Float](repeating: 0, count: halfSize)
-        var splitImag = [Float](repeating: 0, count: halfSize)
+        let suggestedWorkers = min(
+            config.maxParallelWorkers,
+            ProcessInfo.processInfo.activeProcessorCount,
+            processedFrameCount
+        )
+        let workerCount = max(1, suggestedWorkers)
 
-        try fftInput.withUnsafeMutableBufferPointer { fftInputPtr in
-            try splitReal.withUnsafeMutableBufferPointer { splitRealPtr in
-                try splitImag.withUnsafeMutableBufferPointer { splitImagPtr in
-                    guard
-                        let fftInputBase = fftInputPtr.baseAddress,
-                        let splitRealBase = splitRealPtr.baseAddress,
-                        let splitImagBase = splitImagPtr.baseAddress
-                    else {
-                        throw SpectrogramAnalyzerError.fftSetupFailed
-                    }
+        var partials: [PartialSpectrum] = []
+        partials.reserveCapacity(workerCount)
 
-                    var splitComplex = DSPSplitComplex(realp: splitRealBase, imagp: splitImagBase)
-
-                    for frameIndex in 0..<paddedFrameCount {
-                        if frameIndex % 64 == 0 {
-                            try throwIfCancelled()
-                        }
-
-                        let start = frameIndex * config.hopSize
-                        var frameMean: Float = 0
-                        for sampleIndex in 0..<fftSize {
-                            frameMean += paddedSamples[start + sampleIndex]
-                        }
-                        frameMean /= Float(fftSize)
-
-                        for sampleIndex in 0..<fftSize {
-                            let centered = paddedSamples[start + sampleIndex] - frameMean
-                            fftInputPtr[sampleIndex] = centered * window[sampleIndex]
-                        }
-
-                        fftInputBase.withMemoryRebound(to: DSPComplex.self, capacity: halfSize) { complexBuffer in
-                            vDSP_ctoz(
-                                complexBuffer,
-                                2,
-                                &splitComplex,
-                                1,
-                                vDSP_Length(halfSize)
-                            )
-                        }
-
-                        vDSP_fft_zrip(
-                            fftSetup,
-                            &splitComplex,
-                            1,
-                            log2n,
-                            FFTDirection(FFT_FORWARD)
+        if workerCount == 1 {
+            let partial = try processFrameChunk(
+                workerIndex: 0,
+                workerCount: 1,
+                paddedSamples: paddedSamples,
+                window: window,
+                fftSize: fftSize,
+                hopSize: config.hopSize,
+                bins: bins,
+                columns: columns,
+                paddedFrameCount: paddedFrameCount,
+                processedFrameCount: processedFrameCount,
+                frameStride: frameStride,
+                framesPerColumn: framesPerColumn,
+                edgeScale: edgeScale,
+                interiorScale: interiorScale
+            )
+            partials.append(partial)
+        } else {
+            try await withThrowingTaskGroup(of: PartialSpectrum.self) { group in
+                for workerIndex in 0..<workerCount {
+                    group.addTask(priority: .userInitiated) {
+                        try processFrameChunk(
+                            workerIndex: workerIndex,
+                            workerCount: workerCount,
+                            paddedSamples: analysisSamples,
+                            window: window,
+                            fftSize: fftSize,
+                            hopSize: config.hopSize,
+                            bins: bins,
+                            columns: columns,
+                            paddedFrameCount: paddedFrameCount,
+                            processedFrameCount: processedFrameCount,
+                            frameStride: frameStride,
+                            framesPerColumn: framesPerColumn,
+                            edgeScale: edgeScale,
+                            interiorScale: interiorScale
                         )
-
-                        let columnIndex = min(columns - 1, Int(Double(frameIndex) / framesPerColumn))
-                        let columnOffset = columnIndex * bins
-                        columnFrameCounts[columnIndex] += 1
-
-                        let dc = splitRealBase[0] * splitRealBase[0] * edgeScale
-                        aggregatedPowerSums[columnOffset] += dc
-
-                        if bins > 2 {
-                            for bin in 1..<(bins - 1) {
-                                let real = splitRealBase[bin]
-                                let imag = splitImagBase[bin]
-                                let power = (real * real + imag * imag) * interiorScale
-                                aggregatedPowerSums[columnOffset + bin] += power
-                            }
-                        }
-
-                        let nyquist = splitImagBase[0] * splitImagBase[0] * edgeScale
-                        aggregatedPowerSums[columnOffset + bins - 1] += nyquist
                     }
                 }
+
+                for try await partial in group {
+                    partials.append(partial)
+                }
+            }
+        }
+
+        var aggregatedPowerSums = [Float](repeating: 0, count: columns * bins)
+        var columnFrameCounts = [Int](repeating: 0, count: columns)
+
+        for partial in partials {
+            for index in 0..<(columns * bins) {
+                aggregatedPowerSums[index] += partial.powerSums[index]
+            }
+            for column in 0..<columns {
+                columnFrameCounts[column] += partial.frameCounts[column]
             }
         }
 
@@ -272,6 +794,118 @@ enum SpectrogramAnalyzer {
         )
     }
 
+    private static func processFrameChunk(
+        workerIndex: Int,
+        workerCount: Int,
+        paddedSamples: [Float],
+        window: [Float],
+        fftSize: Int,
+        hopSize: Int,
+        bins: Int,
+        columns: Int,
+        paddedFrameCount: Int,
+        processedFrameCount: Int,
+        frameStride: Int,
+        framesPerColumn: Double,
+        edgeScale: Float,
+        interiorScale: Float
+    ) throws -> PartialSpectrum {
+        let halfSize = fftSize / 2
+        let log2n = vDSP_Length(Int(log2(Double(fftSize))))
+
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            throw SpectrogramAnalyzerError.fftSetupFailed
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        var localPowerSums = [Float](repeating: 0, count: columns * bins)
+        var localFrameCounts = [Int](repeating: 0, count: columns)
+
+        var fftInput = [Float](repeating: 0, count: fftSize)
+        var splitReal = [Float](repeating: 0, count: halfSize)
+        var splitImag = [Float](repeating: 0, count: halfSize)
+
+        try paddedSamples.withUnsafeBufferPointer { samplePtr in
+            try window.withUnsafeBufferPointer { windowPtr in
+                try splitReal.withUnsafeMutableBufferPointer { splitRealPtr in
+                    try splitImag.withUnsafeMutableBufferPointer { splitImagPtr in
+                        try fftInput.withUnsafeMutableBufferPointer { fftInputPtr in
+                            guard
+                                let samplesBase = samplePtr.baseAddress,
+                                let windowBase = windowPtr.baseAddress,
+                                let fftInputBase = fftInputPtr.baseAddress,
+                                let splitRealBase = splitRealPtr.baseAddress,
+                                let splitImagBase = splitImagPtr.baseAddress
+                            else {
+                                throw SpectrogramAnalyzerError.fftSetupFailed
+                            }
+
+                            var splitComplex = DSPSplitComplex(realp: splitRealBase, imagp: splitImagBase)
+
+                            let vectorLength = vDSP_Length(fftSize)
+
+                            for processedOrdinal in stride(from: workerIndex, to: processedFrameCount, by: workerCount) {
+                                if processedOrdinal % 64 == 0 {
+                                    try throwIfCancelled()
+                                }
+
+                                let frameIndex = processedOrdinal * frameStride
+                                if frameIndex >= paddedFrameCount {
+                                    break
+                                }
+
+                                let start = frameIndex * hopSize
+                                let frameBase = samplesBase + start
+
+                                fftInputBase.update(from: frameBase, count: fftSize)
+
+                                var frameMean: Float = 0
+                                vDSP_meanv(fftInputBase, 1, &frameMean, vectorLength)
+
+                                var negativeMean = -frameMean
+                                vDSP_vsadd(fftInputBase, 1, &negativeMean, fftInputBase, 1, vectorLength)
+                                vDSP_vmul(fftInputBase, 1, windowBase, 1, fftInputBase, 1, vectorLength)
+
+                                fftInputBase.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { complexBuffer in
+                                    vDSP_ctoz(complexBuffer, 2, &splitComplex, 1, vDSP_Length(fftSize / 2))
+                                }
+
+                                vDSP_fft_zrip(
+                                    fftSetup,
+                                    &splitComplex,
+                                    1,
+                                    log2n,
+                                    FFTDirection(FFT_FORWARD)
+                                )
+
+                                let columnIndex = min(columns - 1, Int(Double(frameIndex) / framesPerColumn))
+                                let columnOffset = columnIndex * bins
+                                localFrameCounts[columnIndex] += 1
+
+                                let dc = splitRealBase[0] * splitRealBase[0] * edgeScale
+                                localPowerSums[columnOffset] += dc
+
+                                if bins > 2 {
+                                    for bin in 1..<(bins - 1) {
+                                        let real = splitRealBase[bin]
+                                        let imag = splitImagBase[bin]
+                                        let power = (real * real + imag * imag) * interiorScale
+                                        localPowerSums[columnOffset + bin] += power
+                                    }
+                                }
+
+                                let nyquist = splitImagBase[0] * splitImagBase[0] * edgeScale
+                                localPowerSums[columnOffset + bins - 1] += nyquist
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return PartialSpectrum(powerSums: localPowerSums, frameCounts: localFrameCounts)
+    }
+
     private static func averagedPowers(
         aggregatedPowerSums: [Float],
         columnFrameCounts: [Int],
@@ -289,6 +923,45 @@ enum SpectrogramAnalyzer {
         }
 
         return averagePowers
+    }
+
+    private static func trackAudioDetails(_ track: AVAssetTrack) async -> (sampleRate: Double, channelCount: Int) {
+        guard let formatDescriptions = try? await track.load(.formatDescriptions),
+              let firstDescription = formatDescriptions.first
+        else {
+            return (0, 0)
+        }
+
+        let cmFormat = firstDescription as CMFormatDescription
+        guard CMFormatDescriptionGetMediaType(cmFormat) == kCMMediaType_Audio,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(cmFormat)?.pointee
+        else {
+            return (0, 0)
+        }
+
+        return (
+            sampleRate: max(0, asbd.mSampleRate),
+            channelCount: max(0, Int(asbd.mChannelsPerFrame))
+        )
+    }
+
+    private static func streamDetails(from sampleBuffer: CMSampleBuffer) -> (sampleRate: Double, channelCount: Int)? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return nil
+        }
+
+        guard CMFormatDescriptionGetMediaType(formatDescription) == kCMMediaType_Audio else {
+            return nil
+        }
+
+        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+            return nil
+        }
+
+        return (
+            sampleRate: max(1.0, asbd.pointee.mSampleRate),
+            channelCount: max(1, Int(asbd.pointee.mChannelsPerFrame))
+        )
     }
 
     private static func lossyCodecCutoffHint(
@@ -380,6 +1053,12 @@ enum SpectrogramAnalyzer {
 
         let overlappedCount = sampleCount - fftSize
         return Int(ceil(Double(overlappedCount) / Double(hopSize))) + 1
+    }
+
+    private static func finiteSeconds(_ time: CMTime) -> Double {
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return seconds
     }
 
     private static func isPowerOfTwo(_ value: Int) -> Bool {

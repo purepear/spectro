@@ -3,11 +3,17 @@ import SwiftUI
 
 @MainActor
 final class SpectroViewModel: ObservableObject {
+    struct ErrorPresentation {
+        let title: String
+        let message: String
+        let technicalDetails: String?
+    }
+
     enum ViewState {
         case idle
         case loading(fileName: String)
         case loaded(SpectrogramResult)
-        case failed(message: String)
+        case failed(ErrorPresentation)
     }
 
     @Published var isImporterPresented = false
@@ -22,7 +28,7 @@ final class SpectroViewModel: ObservableObject {
             guard let url = urls.first else { return }
             load(url: url)
         case let .failure(error):
-            state = .failed(message: "Failed to open file: \(userFacingErrorMessage(error))")
+            state = .failed(makeErrorPresentation(from: error, title: "Failed to open file"))
         }
     }
 
@@ -57,7 +63,7 @@ final class SpectroViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                self.state = .failed(message: userFacingErrorMessage(error))
+                self.state = .failed(makeErrorPresentation(from: error, title: "Could not analyze this file"))
             }
         }
     }
@@ -72,7 +78,35 @@ final class SpectroViewModel: ObservableObject {
         return url
     }
 
-    private func userFacingErrorMessage(_ error: Error) -> String {
+    private func makeErrorPresentation(from error: Error, title: String) -> ErrorPresentation {
+        let friendlyMessage = friendlyMessage(for: error)
+        let details = technicalErrorDetails(error)
+        return ErrorPresentation(title: title, message: friendlyMessage, technicalDetails: details)
+    }
+
+    private func friendlyMessage(for error: Error) -> String {
+        if let analyzerError = error as? SpectrogramAnalyzerError {
+            switch analyzerError {
+            case .noAudioTrack:
+                return "The selected file does not contain an audio track."
+            case .emptyAnalysis:
+                return "The file appears to contain no readable audio samples."
+            case .cannotCreateAssetReader, .cannotAddReaderOutput, .cannotReadSampleBuffer:
+                return "This audio file could not be decoded with the native macOS audio pipeline."
+            case .fftSetupFailed, .renderingFailed:
+                return "Analysis failed during spectrogram processing."
+            }
+        }
+
+        let nsError = error as NSError
+        let description = nsError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !description.isEmpty {
+            return description
+        }
+        return "An unexpected error occurred."
+    }
+
+    private func technicalErrorDetails(_ error: Error) -> String {
         let nsError = error as NSError
         var parts: [String] = []
 

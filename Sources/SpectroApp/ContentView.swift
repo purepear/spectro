@@ -51,13 +51,28 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-        case let .failed(message):
+        case let .failed(error):
             VStack(spacing: 10) {
-                Text("Could not analyze this file")
+                Text(error.title)
                     .font(.headline)
-                Text(message)
+                Text(error.message)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
+
+                if let details = error.technicalDetails, !details.isEmpty {
+                    DisclosureGroup("Technical details") {
+                        ScrollView {
+                            Text(details)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                    .frame(maxWidth: 760)
+                }
+
                 Button("Choose Another File") {
                     viewModel.isImporterPresented = true
                 }

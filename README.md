@@ -39,6 +39,15 @@ Or via CLI:
 swift run Spectro
 ```
 
+## Testing
+
+```bash
+swift test
+```
+
+- Renderer tests run out of the box.
+- Analyzer fixture tests look for optional files in `Tests/Fixtures/Audio`.
+
 ## Important local prerequisite
 
 On this machine, Swift/Xcode CLI commands are currently blocked until the Apple SDK license is accepted:
@@ -54,3 +63,4 @@ After accepting, `swift run` and command-line build checks should work.
 - Supported formats depend on codecs available in the running macOS version.
 - Very long files may take time because v1 performs full-file analysis and static image generation.
 - v1 intentionally does not include interactive zoom/pan or user-adjustable FFT settings.
+- See `docs/AppStoreReleaseChecklist.md` for release hardening and App Store prep.

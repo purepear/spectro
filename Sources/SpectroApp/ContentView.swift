@@ -12,12 +12,16 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 content
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 20)
+            .padding(.top, 8)
 
             if viewModel.isDropTargeted {
                 RoundedRectangle(cornerRadius: 14)
                     .strokeBorder(.blue, style: StrokeStyle(lineWidth: 3, dash: [10, 8]))
-                    .padding(12)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .padding(.top, 0)
                     .allowsHitTesting(false)
             }
         }

@@ -44,7 +44,7 @@ enum SpectrogramPalette {
     }
 
     static var legendGradient: Gradient {
-        Gradient(stops: stops.map { stop in
+        let gradientStops = stops.map { stop in
             Gradient.Stop(
                 color: Color(
                     red: Double(stop.color.r) / 255.0,
@@ -53,7 +53,10 @@ enum SpectrogramPalette {
                 ),
                 location: 1 - Double(stop.position)
             )
-        })
+        }
+        .sorted { $0.location < $1.location }
+
+        return Gradient(stops: gradientStops)
     }
 
     private static func interpolate(_ a: UInt8, _ b: UInt8, t: Float) -> UInt8 {

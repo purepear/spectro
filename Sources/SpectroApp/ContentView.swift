@@ -6,6 +6,9 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            Color.black
+                .ignoresSafeArea()
+
             VStack(spacing: 16) {
                 content
             }

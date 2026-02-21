@@ -8,6 +8,7 @@ struct SpectroApp: App {
         WindowGroup("Spectro") {
             ContentView(viewModel: viewModel)
                 .frame(minWidth: 640, minHeight: 480)
+                .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1200, height: 800)
         .commands {

@@ -30,9 +30,7 @@ struct ContentView: View {
         .dropDestination(for: URL.self, action: { urls, _ in
             viewModel.handleDropped(urls: urls)
         }, isTargeted: { isTargeted in
-            Task { @MainActor in
-                viewModel.isDropTargeted = isTargeted
-            }
+            viewModel.isDropTargeted = isTargeted
         })
     }
 

@@ -63,21 +63,13 @@ final class SpectroViewModel: ObservableObject {
     }
 
     private func normalizedFileURL(from url: URL) -> URL {
-        let fileURL: URL
         if url.isFileURL {
-            fileURL = url
-        } else if let decoded = URL(string: url.absoluteString.removingPercentEncoding ?? url.absoluteString), decoded.isFileURL {
-            fileURL = decoded
-        } else {
-            fileURL = url
+            return url
         }
-
-        let standardized = fileURL.standardizedFileURL
-        if let resolvedAlias = try? URL(resolvingAliasFileAt: standardized) {
-            return resolvedAlias.standardizedFileURL
+        if let decoded = URL(string: url.absoluteString.removingPercentEncoding ?? url.absoluteString), decoded.isFileURL {
+            return decoded
         }
-
-        return standardized.resolvingSymlinksInPath()
+        return url
     }
 
     private func userFacingErrorMessage(_ error: Error) -> String {

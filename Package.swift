@@ -16,6 +16,11 @@ let package = Package(
         .executableTarget(
             name: "SpectroApp",
             path: "Sources/SpectroApp"
+        ),
+        .testTarget(
+            name: "SpectroAppTests",
+            dependencies: ["SpectroApp"],
+            path: "Tests/SpectroAppTests"
         )
     ]
 )

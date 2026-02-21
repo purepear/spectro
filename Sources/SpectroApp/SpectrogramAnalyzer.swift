@@ -236,6 +236,7 @@ enum SpectrogramAnalyzer {
         var fftInput = [Float](repeating: 0, count: fftSize)
         var splitReal = [Float](repeating: 0, count: halfSize)
         var splitImag = [Float](repeating: 0, count: halfSize)
+        var interiorMagnitudes = [Float](repeating: 0, count: max(0, bins - 2))
 
         let vectorLength = vDSP_Length(fftSize)
         var frameIndex = 0
@@ -357,6 +358,7 @@ enum SpectrogramAnalyzer {
                                     framesPerColumn: framesPerColumn,
                                     edgeScale: edgeScale,
                                     interiorScale: interiorScale,
+                                    interiorMagnitudes: &interiorMagnitudes,
                                     aggregatedPowerSums: &aggregatedPowerSums,
                                     columnFrameCounts: &columnFrameCounts
                                 )
@@ -408,6 +410,7 @@ enum SpectrogramAnalyzer {
                                 framesPerColumn: framesPerColumn,
                                 edgeScale: edgeScale,
                                 interiorScale: interiorScale,
+                                interiorMagnitudes: &interiorMagnitudes,
                                 aggregatedPowerSums: &aggregatedPowerSums,
                                 columnFrameCounts: &columnFrameCounts
                             )
@@ -479,6 +482,7 @@ enum SpectrogramAnalyzer {
         framesPerColumn: Double,
         edgeScale: Float,
         interiorScale: Float,
+        interiorMagnitudes: inout [Float],
         aggregatedPowerSums: inout [Float],
         columnFrameCounts: inout [Int]
     ) {
@@ -523,12 +527,43 @@ enum SpectrogramAnalyzer {
                 let dc = splitRealBase[0] * splitRealBase[0] * edgeScale
                 aggregatedPowerSums[columnOffset] += dc
 
-                if bins > 2 {
-                    for bin in 1..<(bins - 1) {
-                        let real = splitRealBase[bin]
-                        let imag = splitImagBase[bin]
-                        let power = (real * real + imag * imag) * interiorScale
-                        aggregatedPowerSums[columnOffset + bin] += power
+                let interiorCount = bins - 2
+                if interiorCount > 0 {
+                    var interiorComplex = DSPSplitComplex(
+                        realp: splitRealBase + 1,
+                        imagp: splitImagBase + 1
+                    )
+
+                    aggregatedPowerSums.withUnsafeMutableBufferPointer { aggregatePtr in
+                        interiorMagnitudes.withUnsafeMutableBufferPointer { magnitudesPtr in
+                            guard
+                                let aggregateBase = aggregatePtr.baseAddress,
+                                let magnitudesBase = magnitudesPtr.baseAddress
+                            else {
+                                return
+                            }
+
+                            vDSP_zvmags(
+                                &interiorComplex,
+                                1,
+                                magnitudesBase,
+                                1,
+                                vDSP_Length(interiorCount)
+                            )
+
+                            let destination = aggregateBase + columnOffset + 1
+                            var scale = interiorScale
+                            vDSP_vsma(
+                                magnitudesBase,
+                                1,
+                                &scale,
+                                destination,
+                                1,
+                                destination,
+                                1,
+                                vDSP_Length(interiorCount)
+                            )
+                        }
                     }
                 }
 

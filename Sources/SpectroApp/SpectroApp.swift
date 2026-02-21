@@ -7,7 +7,7 @@ struct SpectroApp: App {
     var body: some Scene {
         WindowGroup("Spectro") {
             ContentView(viewModel: viewModel)
-                .frame(minWidth: 980, minHeight: 720)
+                .frame(minWidth: 640, minHeight: 480)
         }
         .defaultSize(width: 1200, height: 800)
         .commands {

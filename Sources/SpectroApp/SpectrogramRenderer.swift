@@ -2,6 +2,14 @@ import CoreGraphics
 import Foundation
 
 enum SpectrogramRenderer {
+    private static let paletteResolution = 1024
+    private static let paletteLUT: [RGB8] = {
+        (0..<paletteResolution).map { index in
+            let normalized = Float(index) / Float(max(1, paletteResolution - 1))
+            return SpectrogramPalette.color(for: normalized)
+        }
+    }()
+
     static func render(
         decibelsByColumn: [Float],
         columns: Int,
@@ -22,40 +30,70 @@ enum SpectrogramRenderer {
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
 
-        let minHz = max(0, minFrequency)
-        let maxHz = max(maxFrequency, minHz + 1)
+        let minHz = Float(max(0, minFrequency))
+        let maxHz = Float(max(maxFrequency, Double(minHz) + 1.0))
+        let sampleRateFloat = Float(sampleRate)
         let dbSpan = max(0.001, maxDecibels - minDecibels)
+        let invDbSpan: Float = 1.0 / dbSpan
 
-        var mappedBin = [Double](repeating: 0, count: height)
+        var lowerBins = [Int](repeating: 0, count: height)
+        var upperBins = [Int](repeating: 0, count: height)
+        var binMixes = [Float](repeating: 0, count: height)
         for y in 0..<height {
-            let normalizedY = Double(height - 1 - y) / Double(max(1, height - 1))
+            let normalizedY = Float(height - 1 - y) / Float(max(1, height - 1))
             let frequency = minHz + normalizedY * (maxHz - minHz)
-            let bin = frequency * Double((bins - 1) * 2) / sampleRate
-            mappedBin[y] = min(Double(bins - 1), max(0, bin))
+            let bin = frequency * Float((bins - 1) * 2) / max(1.0, sampleRateFloat)
+            let clamped = min(Float(bins - 1), max(0, bin))
+
+            let lower = Int(clamped)
+            lowerBins[y] = lower
+            upperBins[y] = min(bins - 1, lower + 1)
+            binMixes[y] = clamped - Float(lower)
         }
 
         var pixels = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
+        let palette = paletteLUT
+        let paletteMaxIndex = palette.count - 1
+        let paletteScale = Float(paletteMaxIndex)
 
-        for y in 0..<height {
-            let binPosition = mappedBin[y]
-            let lowerBin = Int(binPosition)
-            let upperBin = min(bins - 1, lowerBin + 1)
-            let mix = Float(binPosition - Double(lowerBin))
+        decibelsByColumn.withUnsafeBufferPointer { decibelsPtr in
+            pixels.withUnsafeMutableBufferPointer { pixelsPtr in
+                guard
+                    let decibelsBase = decibelsPtr.baseAddress,
+                    let pixelsBase = pixelsPtr.baseAddress
+                else {
+                    return
+                }
 
-            for x in 0..<width {
-                let sourceOffset = x * bins
-                let low = decibelsByColumn[sourceOffset + lowerBin]
-                let high = decibelsByColumn[sourceOffset + upperBin]
-                let decibels = low + (high - low) * mix
+                for y in 0..<height {
+                    let lowerBin = lowerBins[y]
+                    let upperBin = upperBins[y]
+                    let mix = binMixes[y]
 
-                let normalized = min(1, max(0, (decibels - minDecibels) / dbSpan))
-                let color = SpectrogramPalette.color(for: normalized)
+                    var sourceLowOffset = lowerBin
+                    var sourceHighOffset = upperBin
+                    var pixelOffset = y * bytesPerRow
 
-                let pixelOffset = (y * width + x) * bytesPerPixel
-                pixels[pixelOffset] = color.r
-                pixels[pixelOffset + 1] = color.g
-                pixels[pixelOffset + 2] = color.b
-                pixels[pixelOffset + 3] = 255
+                    for _ in 0..<width {
+                        let low = decibelsBase[sourceLowOffset]
+                        let high = decibelsBase[sourceHighOffset]
+                        let decibels = low + (high - low) * mix
+
+                        let normalized = (decibels - minDecibels) * invDbSpan
+                        let clamped = normalized < 0 ? 0 : (normalized > 1 ? 1 : normalized)
+                        let paletteIndex = min(paletteMaxIndex, max(0, Int((clamped * paletteScale).rounded())))
+                        let color = palette[paletteIndex]
+
+                        pixelsBase[pixelOffset] = color.r
+                        pixelsBase[pixelOffset + 1] = color.g
+                        pixelsBase[pixelOffset + 2] = color.b
+                        pixelsBase[pixelOffset + 3] = 255
+
+                        sourceLowOffset += bins
+                        sourceHighOffset += bins
+                        pixelOffset += bytesPerPixel
+                    }
+                }
             }
         }
 

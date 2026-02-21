@@ -98,12 +98,7 @@ private struct StreamingAnalysisResult {
 enum SpectrogramAnalyzer {
     static func analyze(url: URL, config: SpectrogramConfig = .v1) async throws -> SpectrogramResult {
         try await Task.detached(priority: .userInitiated) {
-            // Fast path: AVAudioFile decode + parallel FFT analysis.
-            if let decodedResult = try await analyzeUsingAVAudioFile(url: url, config: config) {
-                return decodedResult
-            }
-
-            // Fallback: stream and analyze directly from AVAssetReader in one pass.
+            // Stream and analyze directly from AVAssetReader in one pass.
             let streamStart = CFAbsoluteTimeGetCurrent()
             let streaming = try await analyzeUsingAVAssetReaderStream(url: url, config: config)
             let streamDuration = CFAbsoluteTimeGetCurrent() - streamStart
@@ -145,71 +140,6 @@ enum SpectrogramAnalyzer {
                 renderDuration: renderDuration
             )
         }.value
-    }
-
-    private static func analyzeUsingAVAudioFile(url: URL, config: SpectrogramConfig) async throws -> SpectrogramResult? {
-        let decodeStart = CFAbsoluteTimeGetCurrent()
-        let decoded: DecodedAudio
-        do {
-            decoded = try AudioDecoder.decodeMonoSamplesAVAudioFileOnly(from: url)
-        } catch {
-            return nil
-        }
-        let decodeDuration = CFAbsoluteTimeGetCurrent() - decodeStart
-        try throwIfCancelled()
-
-        let cutoffHintHz = await lossyCodecCutoffHint(
-            for: url,
-            sampleRate: decoded.sampleRate,
-            fallbackChannelCount: decoded.channelCount
-        )
-
-        let analysisStart = CFAbsoluteTimeGetCurrent()
-        let aggregated = try await aggregateSpectrum(
-            samples: decoded.samples,
-            sampleRate: decoded.sampleRate,
-            cutoffHintHz: cutoffHintHz,
-            config: config
-        )
-        let analysisDuration = CFAbsoluteTimeGetCurrent() - analysisStart
-        try throwIfCancelled()
-
-        let renderStart = CFAbsoluteTimeGetCurrent()
-        let maxFrequency = decoded.sampleRate / 2.0
-        guard let image = SpectrogramRenderer.render(
-            decibelsByColumn: aggregated.decibelsByColumn,
-            columns: aggregated.columns,
-            bins: aggregated.bins,
-            sampleRate: decoded.sampleRate,
-            minFrequency: config.minFrequency,
-            maxFrequency: maxFrequency,
-            minDecibels: config.minDecibels,
-            maxDecibels: config.maxDecibels,
-            imageHeight: config.imageHeight
-        ) else {
-            throw SpectrogramAnalyzerError.renderingFailed
-        }
-        let renderDuration = CFAbsoluteTimeGetCurrent() - renderStart
-
-        return SpectrogramResult(
-            image: image,
-            fileName: url.lastPathComponent,
-            duration: decoded.duration,
-            sampleRate: decoded.sampleRate,
-            sourceChannelCount: decoded.channelCount,
-            minFrequency: config.minFrequency,
-            maxFrequency: maxFrequency,
-            minDecibels: config.minDecibels,
-            maxDecibels: config.maxDecibels,
-            fftSize: config.fftSize,
-            hopSize: config.hopSize,
-            renderedWidth: aggregated.columns,
-            renderedHeight: config.imageHeight,
-            decoderBackend: decoded.backend.rawValue,
-            decodeDuration: decodeDuration,
-            analysisDuration: analysisDuration,
-            renderDuration: renderDuration
-        )
     }
 
     private static func analyzeUsingAVAssetReaderStream(url: URL, config: SpectrogramConfig) async throws -> StreamingAnalysisResult {

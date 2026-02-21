@@ -5,7 +5,7 @@ Native macOS spectrogram app prototype built with Apple frameworks only.
 ## Stack
 
 - `SwiftUI` for UI
-- `AVFoundation` (`AVAudioFile`) for decoding audio to PCM
+- `AVFoundation` (`AVAssetReader`) for streaming decode to PCM
 - `Accelerate/vDSP` for windowing + FFT
 - `CoreGraphics` for static spectrogram image rendering
 
@@ -26,7 +26,7 @@ No third-party libraries are used.
   - Adaptive frame subsampling for faster analysis on long files
   - Multi-core FFT processing for faster analysis
   - Decoder + stage timing shown in UI (`decode / analyze / render`)
-  - AVAssetReader fallback uses one-pass stream analysis (no full PCM staging)
+  - One-pass AVAssetReader stream analysis (no full PCM staging)
   - Static image output
 
 ## Run

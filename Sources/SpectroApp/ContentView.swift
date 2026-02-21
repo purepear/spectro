@@ -32,6 +32,12 @@ struct ContentView: View {
         }, isTargeted: { isTargeted in
             viewModel.isDropTargeted = isTargeted
         })
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("Spectro")
+                    .font(.headline)
+            }
+        }
     }
 
     @ViewBuilder

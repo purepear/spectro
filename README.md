@@ -46,7 +46,7 @@ swift test
 ```
 
 - Renderer tests run out of the box.
-- Analyzer fixture tests look for optional files in `Tests/Fixtures/Audio`.
+- Analyzer tests validate the bundled Espressif fixture set in `Tests/Fixtures/Audio/Espressif`.
 
 ## Important local prerequisite
 

@@ -4,6 +4,76 @@ import XCTest
 @testable import SpectroApp
 
 final class SpectrogramAnalyzerTests: XCTestCase {
+    private static let expectedEspressifFiles: [String] = [
+        "ff-16b-1c-11025hz.mp3",
+        "ff-16b-1c-12000hz.mp3",
+        "ff-16b-1c-16000hz.mp3",
+        "ff-16b-1c-22050hz.mp3",
+        "ff-16b-1c-24000hz.mp3",
+        "ff-16b-1c-32000hz.mp3",
+        "ff-16b-1c-44100hz.aac",
+        "ff-16b-1c-44100hz.flac",
+        "ff-16b-1c-44100hz.m4a",
+        "ff-16b-1c-44100hz.mp3",
+        "ff-16b-1c-44100hz.ogg",
+        "ff-16b-1c-44100hz.opus",
+        "ff-16b-1c-44100hz.wav",
+        "ff-16b-1c-8000hz.amr",
+        "ff-16b-1c-8000hz.mp3",
+        "ff-16b-2c-11025hz.mp3",
+        "ff-16b-2c-12000hz.mp3",
+        "ff-16b-2c-16000hz.mp3",
+        "ff-16b-2c-22050hz.mp3",
+        "ff-16b-2c-24000hz.mp3",
+        "ff-16b-2c-32000hz.mp3",
+        "ff-16b-2c-44100hz.aac",
+        "ff-16b-2c-44100hz.flac",
+        "ff-16b-2c-44100hz.m4a",
+        "ff-16b-2c-44100hz.mp3",
+        "ff-16b-2c-44100hz.ogg",
+        "ff-16b-2c-44100hz.opus",
+        "ff-16b-2c-44100hz.wav",
+        "ff-16b-2c-8000hz.mp3",
+        "gs-16b-1c-44100hz.aac",
+        "gs-16b-1c-44100hz.flac",
+        "gs-16b-1c-44100hz.m4a",
+        "gs-16b-1c-44100hz.mp3",
+        "gs-16b-1c-44100hz.ogg",
+        "gs-16b-1c-44100hz.opus",
+        "gs-16b-1c-44100hz.wav",
+        "gs-16b-1c-8000hz.amr",
+        "gs-16b-2c-44100hz.aac",
+        "gs-16b-2c-44100hz.flac",
+        "gs-16b-2c-44100hz.m4a",
+        "gs-16b-2c-44100hz.mp3",
+        "gs-16b-2c-44100hz.ogg",
+        "gs-16b-2c-44100hz.opus",
+        "gs-16b-2c-44100hz.wav"
+    ]
+
+    private static let coreAnalysisFixtures: [String] = [
+        "ff-16b-1c-44100hz.aac",
+        "ff-16b-1c-44100hz.flac",
+        "ff-16b-1c-44100hz.m4a",
+        "ff-16b-1c-44100hz.mp3",
+        "ff-16b-1c-44100hz.wav",
+        "ff-16b-2c-44100hz.aac",
+        "ff-16b-2c-44100hz.flac",
+        "ff-16b-2c-44100hz.m4a",
+        "ff-16b-2c-44100hz.mp3",
+        "ff-16b-2c-44100hz.wav",
+        "gs-16b-1c-44100hz.aac",
+        "gs-16b-1c-44100hz.flac",
+        "gs-16b-1c-44100hz.m4a",
+        "gs-16b-1c-44100hz.mp3",
+        "gs-16b-1c-44100hz.wav",
+        "gs-16b-2c-44100hz.aac",
+        "gs-16b-2c-44100hz.flac",
+        "gs-16b-2c-44100hz.m4a",
+        "gs-16b-2c-44100hz.mp3",
+        "gs-16b-2c-44100hz.wav"
+    ]
+
     func testAnalyzeGeneratedWAV() async throws {
         let url = try makeTemporarySineWAV(sampleRate: 44_100, duration: 1.2, frequency: 1_000)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -20,28 +90,36 @@ final class SpectrogramAnalyzerTests: XCTestCase {
         XCTAssertEqual(result.maxFrequency, result.sampleRate / 2.0, accuracy: 0.5)
     }
 
-    func testAnalyzeFixtureWAVIfPresent() async throws {
-        try await assertFixtureCanAnalyze("sample.wav")
-    }
-
-    func testAnalyzeFixtureAACIfPresent() async throws {
-        try await assertFixtureCanAnalyze("sample.m4a")
-    }
-
-    func testAnalyzeFixtureMP3IfPresent() async throws {
-        try await assertFixtureCanAnalyze("sample.mp3")
-    }
-
-    func testAnalyzeFixtureFLACIfPresent() async throws {
-        try await assertFixtureCanAnalyze("sample.flac")
-    }
-
-    private func assertFixtureCanAnalyze(_ fileName: String) async throws {
-        let url = fixtureAudioDirectory.appendingPathComponent(fileName)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("Fixture not found: \(url.path)")
+    func testEspressifFixtureSetIsCompleteAndNonEmpty() throws {
+        let directory = espressifFixtureAudioDirectory
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            throw XCTSkip("Espressif fixture directory not found: \(directory.path)")
         }
 
+        let files = try fixtureFileNames(in: directory)
+        XCTAssertEqual(Set(files), Set(Self.expectedEspressifFiles))
+
+        for fileName in Self.expectedEspressifFiles {
+            let url = directory.appendingPathComponent(fileName)
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let size = attributes[.size] as? NSNumber
+            XCTAssertGreaterThan(size?.intValue ?? 0, 0, "Empty fixture file: \(fileName)")
+        }
+    }
+
+    func testAnalyzeEspressifCoreFormats() async throws {
+        let directory = espressifFixtureAudioDirectory
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            throw XCTSkip("Espressif fixture directory not found: \(directory.path)")
+        }
+
+        for fileName in Self.coreAnalysisFixtures {
+            try await assertFixtureCanAnalyze(fileName, in: directory)
+        }
+    }
+
+    private func assertFixtureCanAnalyze(_ fileName: String, in directory: URL) async throws {
+        let url = directory.appendingPathComponent(fileName)
         let result = try await SpectrogramAnalyzer.analyze(url: url)
         XCTAssertGreaterThan(result.duration, 0)
         XCTAssertGreaterThan(result.sampleRate, 0)
@@ -55,6 +133,23 @@ final class SpectrogramAnalyzerTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures", isDirectory: true)
             .appendingPathComponent("Audio", isDirectory: true)
+    }
+
+    private var espressifFixtureAudioDirectory: URL {
+        fixtureAudioDirectory.appendingPathComponent("Espressif", isDirectory: true)
+    }
+
+    private func fixtureFileNames(in directory: URL) throws -> [String] {
+        let allowedExtensions: Set<String> = ["aac", "amr", "flac", "m4a", "mp3", "ogg", "opus", "wav"]
+        let names = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        .filter { allowedExtensions.contains($0.pathExtension.lowercased()) }
+        .map(\.lastPathComponent)
+        .sorted()
+        return names
     }
 
     private func makeTemporarySineWAV(sampleRate: Double, duration: Double, frequency: Double) throws -> URL {

@@ -1,8 +1,9 @@
-Place optional analyzer fixture files in this directory:
+Analyzer fixtures live under this directory.
 
-- `sample.wav`
-- `sample.m4a` (AAC)
-- `sample.mp3`
-- `sample.flac`
+- `Espressif/` contains samples downloaded from:
+  - `https://docs.espressif.com/projects/esp-adf/en/latest/design-guide/audio-samples.html`
 
-The analyzer tests will skip each fixture test when the matching file is missing.
+Test behavior:
+
+- `testEspressifFixtureSetIsCompleteAndNonEmpty` checks that all expected files exist and are non-empty.
+- `testAnalyzeEspressifCoreFormats` runs full spectrogram analysis on a core subset of AAC/FLAC/M4A/MP3/WAV fixtures.

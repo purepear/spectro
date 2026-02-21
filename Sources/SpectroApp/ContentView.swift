@@ -7,8 +7,6 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 16) {
-                header
-                Divider()
                 content
             }
             .padding(20)
@@ -33,20 +31,6 @@ struct ContentView: View {
                 viewModel.isDropTargeted = isTargeted
             }
         })
-    }
-
-    private var header: some View {
-        HStack {
-            Text("Spectro")
-                .font(.system(size: 28, weight: .semibold))
-
-            Spacer()
-
-            Button("Open Audio File...") {
-                viewModel.isImporterPresented = true
-            }
-            .keyboardShortcut("o", modifiers: [.command])
-        }
     }
 
     @ViewBuilder

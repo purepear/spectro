@@ -32,6 +32,9 @@ struct SpectrogramResult {
     let duration: TimeInterval
     let sampleRate: Double
     let sourceChannelCount: Int
+    let sourceContainerFormat: String
+    let sourceCodec: String
+    let sourceBitRate: Double?
     let minFrequency: Double
     let maxFrequency: Double
     let minDecibels: Float
@@ -79,6 +82,9 @@ private struct StreamingAnalysisResult {
     let spectrum: AggregatedSpectrum
     let sampleRate: Double
     let sourceChannelCount: Int
+    let sourceContainerFormat: String
+    let sourceCodec: String
+    let sourceBitRate: Double?
     let duration: TimeInterval
 }
 
@@ -108,6 +114,9 @@ enum SpectrogramAnalyzer {
                 duration: streaming.duration,
                 sampleRate: streaming.sampleRate,
                 sourceChannelCount: streaming.sourceChannelCount,
+                sourceContainerFormat: streaming.sourceContainerFormat,
+                sourceCodec: streaming.sourceCodec,
+                sourceBitRate: streaming.sourceBitRate,
                 minFrequency: config.minFrequency,
                 maxFrequency: maxFrequency,
                 minDecibels: config.minDecibels,
@@ -131,6 +140,12 @@ enum SpectrogramAnalyzer {
 
         let assetDurationTime = (try? await asset.load(.duration)) ?? CMTime.invalid
         let durationSeconds = finiteSeconds(assetDurationTime)
+        let sourceInfo = await sourceAudioInfo(
+            for: url,
+            track: track,
+            formatID: initialDetails.formatID,
+            durationSeconds: durationSeconds
+        )
         let estimatedSampleCount = max(config.fftSize, Int(durationSeconds * sampleRate))
 
         let frameEstimate = requiredFrameCount(
@@ -446,6 +461,9 @@ enum SpectrogramAnalyzer {
             ),
             sampleRate: sampleRate,
             sourceChannelCount: sourceChannelCount,
+            sourceContainerFormat: sourceInfo.containerFormat,
+            sourceCodec: sourceInfo.codec,
+            sourceBitRate: sourceInfo.bitRate,
             duration: finalDuration
         )
     }
@@ -649,24 +667,124 @@ enum SpectrogramAnalyzer {
         return averagePowers
     }
 
-    private static func trackAudioDetails(_ track: AVAssetTrack) async -> (sampleRate: Double, channelCount: Int) {
+    private static func trackAudioDetails(_ track: AVAssetTrack) async -> (sampleRate: Double, channelCount: Int, formatID: UInt32?) {
         guard let formatDescriptions = try? await track.load(.formatDescriptions),
               let firstDescription = formatDescriptions.first
         else {
-            return (0, 0)
+            return (0, 0, nil)
         }
 
         let cmFormat = firstDescription as CMFormatDescription
         guard CMFormatDescriptionGetMediaType(cmFormat) == kCMMediaType_Audio,
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(cmFormat)?.pointee
         else {
-            return (0, 0)
+            return (0, 0, nil)
         }
 
         return (
             sampleRate: max(0, asbd.mSampleRate),
-            channelCount: max(0, Int(asbd.mChannelsPerFrame))
+            channelCount: max(0, Int(asbd.mChannelsPerFrame)),
+            formatID: asbd.mFormatID
         )
+    }
+
+    private static func sourceAudioInfo(
+        for url: URL,
+        track: AVAssetTrack,
+        formatID: UInt32?,
+        durationSeconds: Double
+    ) async -> (containerFormat: String, codec: String, bitRate: Double?) {
+        let container = containerName(for: url)
+        let codec = codecName(for: formatID)
+        let trackBitRate = Double((try? await track.load(.estimatedDataRate)) ?? 0)
+
+        if trackBitRate > 0 {
+            return (container, codec, trackBitRate)
+        }
+
+        guard durationSeconds > 0 else {
+            return (container, codec, nil)
+        }
+
+        if let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, fileSize > 0 {
+            let derivedBitRate = (Double(fileSize) * 8.0) / durationSeconds
+            if derivedBitRate.isFinite, derivedBitRate > 0 {
+                return (container, codec, derivedBitRate)
+            }
+        }
+
+        return (container, codec, nil)
+    }
+
+    private static func containerName(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "aac":
+            return "AAC"
+        case "aif", "aiff":
+            return "AIFF"
+        case "amr":
+            return "AMR"
+        case "flac":
+            return "FLAC"
+        case "m4a":
+            return "M4A"
+        case "mp3":
+            return "MP3"
+        case "ogg":
+            return "OGG"
+        case "opus":
+            return "Opus"
+        case "wav":
+            return "WAV"
+        default:
+            let ext = url.pathExtension
+            return ext.isEmpty ? "Unknown" : ext.uppercased()
+        }
+    }
+
+    private static func codecName(for formatID: UInt32?) -> String {
+        guard let formatID else {
+            return "Unknown codec"
+        }
+
+        switch formatID {
+        case kAudioFormatLinearPCM:
+            return "Linear PCM"
+        case kAudioFormatMPEGLayer3:
+            return "MPEG Audio Layer III"
+        case kAudioFormatMPEG4AAC:
+            return "AAC"
+        case kAudioFormatMPEG4AAC_HE:
+            return "HE-AAC"
+        case kAudioFormatMPEG4AAC_HE_V2:
+            return "HE-AAC v2"
+        case kAudioFormatMPEG4AAC_LD:
+            return "AAC-LD"
+        case kAudioFormatMPEG4AAC_ELD:
+            return "AAC-ELD"
+        case kAudioFormatAppleLossless:
+            return "Apple Lossless"
+        case kAudioFormatFLAC:
+            return "FLAC"
+        case kAudioFormatOpus:
+            return "Opus"
+        default:
+            return fourCCString(formatID)
+        }
+    }
+
+    private static func fourCCString(_ value: UInt32) -> String {
+        let bytes: [UInt8] = [
+            UInt8((value >> 24) & 0xFF),
+            UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF),
+            UInt8(value & 0xFF)
+        ]
+        let isPrintableASCII = bytes.allSatisfy { $0 >= 32 && $0 <= 126 }
+        if isPrintableASCII, let text = String(bytes: bytes, encoding: .ascii) {
+            return text
+        }
+        return String(format: "0x%08X", value)
     }
 
     private static func streamDetails(from sampleBuffer: CMSampleBuffer) -> (sampleRate: Double, channelCount: Int)? {

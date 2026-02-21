@@ -73,7 +73,15 @@ struct SpectrogramView: View {
     }
 
     private var metadataLine: String {
-        "\(formatSampleRate(result.sampleRate)) • \(result.sourceChannelCount) ch mixed to mono • FFT \(result.fftSize) • Hop \(result.hopSize) • Linear frequency"
+        var parts: [String] = []
+        parts.append("Format: \(result.sourceContainerFormat)")
+        parts.append("Codec: \(result.sourceCodec)")
+        if let bitRate = result.sourceBitRate, bitRate > 0 {
+            parts.append("Bitrate: \(formatBitRate(bitRate))")
+        }
+        parts.append("Sample rate: \(formatSampleRate(result.sampleRate))")
+        parts.append("Channels: \(result.sourceChannelCount)")
+        return parts.joined(separator: " • ")
     }
 
     private var frequencyTicks: [Double] {
@@ -82,6 +90,10 @@ struct SpectrogramView: View {
 
     private func formatSampleRate(_ sampleRate: Double) -> String {
         String(format: "%.1f kHz", sampleRate / 1000)
+    }
+
+    private func formatBitRate(_ bitRate: Double) -> String {
+        String(format: "%.0f kbps", bitRate / 1000.0)
     }
 
 }

@@ -69,6 +69,7 @@ swift test
 
 - Renderer tests run out of the box.
 - Analyzer tests validate the bundled Espressif fixture set in `Tests/Fixtures/Audio/Espressif`.
+- Third-party fixture attribution and licensing details are in `THIRD_PARTY_NOTICES.md`.
 
 ## Important local prerequisite
 

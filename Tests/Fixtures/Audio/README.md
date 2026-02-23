@@ -2,6 +2,7 @@ Analyzer fixtures live under this directory.
 
 - `Espressif/` contains samples downloaded from:
   - `https://docs.espressif.com/projects/esp-adf/en/latest/design-guide/audio-samples.html`
+  - Attribution/license details: `THIRD_PARTY_NOTICES.md`
 
 Test behavior:
 

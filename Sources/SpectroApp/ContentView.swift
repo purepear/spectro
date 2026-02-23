@@ -103,7 +103,7 @@ struct ContentView: View {
             Text("Drop an audio file here")
                 .font(.title3)
 
-            Text("or choose Open Audio File… to load MP3, FLAC, AAC, WAV, and other formats supported by macOS")
+            Text("or choose Open Audio File… to load audio files supported by macOS")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 560)

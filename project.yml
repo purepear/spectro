@@ -1,0 +1,54 @@
+name: Spectro
+options:
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MACOSX_DEPLOYMENT_TARGET: 15.0
+
+targets:
+  SpectroApp:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Sources/SpectroApp
+    settings:
+      base:
+        PRODUCT_NAME: Spectro
+        PRODUCT_MODULE_NAME: SpectroApp
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.Spectro
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Spectro
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.music
+        CODE_SIGN_ENTITLEMENTS: Config/SpectroApp.entitlements
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+
+  SpectroAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Tests/SpectroAppTests
+    dependencies:
+      - target: SpectroApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.Spectro.Tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Spectro:
+    build:
+      targets:
+        SpectroApp: all
+        SpectroAppTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SpectroAppTests

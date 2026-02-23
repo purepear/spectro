@@ -1,2 +1,8 @@
 .build/
 .DS_Store
+
+# Xcode user-specific files
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+DerivedData/

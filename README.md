@@ -2,6 +2,9 @@
 
 Native macOS spectrogram app prototype built with Apple frameworks only.
 
+<img width="1224" height="769" alt="image" src="https://github.com/user-attachments/assets/46a5aedd-5f99-401d-bd16-761c3eca0f3b" />
+
+
 ## Stack
 
 - `SwiftUI` for UI
@@ -37,6 +40,24 @@ Or via CLI:
 
 ```bash
 swift run Spectro
+```
+
+## Build As macOS App (`.app`)
+
+This repo now includes a generated Xcode project:
+
+- `Spectro.xcodeproj`
+
+Open it in Xcode and build/run the `Spectro` scheme. The app bundle will be produced as `Spectro.app` in Xcode's build products.
+
+Project generation source is:
+
+- `project.yml`
+
+Regenerate after project-structure changes:
+
+```bash
+xcodegen generate
 ```
 
 ## Testing

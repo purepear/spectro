@@ -2,7 +2,8 @@
 
 Native macOS spectrogram app prototype built with Apple frameworks only.
 
-<img width="1224" height="769" alt="image" src="https://github.com/user-attachments/assets/46a5aedd-5f99-401d-bd16-761c3eca0f3b" />
+<img width="1224" height="769" alt="image" src="https://github.com/user-attachments/assets/5d274d26-eb72-448f-bd45-2bc89b3fac15" />
+
 
 
 ## Stack
